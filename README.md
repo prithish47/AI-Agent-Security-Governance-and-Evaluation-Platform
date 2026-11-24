@@ -85,7 +85,7 @@ flowchart TD
 
 ## 3. Deterministic 7-Rule Policy Evaluation Engine
 
-The policy evaluation engine is implemented in pure Python with **zero dependencies on FastAPI, SQLAlchemy, or AI SDKs**. It operates in microseconds ($\le 0.1 \text{ ms}$ typical latency) and evaluates rules in strict short-circuit order with a **fail-closed** default:
+The policy evaluation engine is implemented in pure Python with **zero dependencies on FastAPI, SQLAlchemy, or AI SDKs**. It operates in microseconds (≤ 0.1 ms typical latency) and evaluates rules in strict short-circuit order with a **fail-closed** default:
 
 | Order | Rule Name | Description | Failure Decision |
 |:---:|---|---|:---:|
@@ -116,7 +116,7 @@ The policy evaluation engine is implemented in pure Python with **zero dependenc
 - **Separation of Duties:** Developers who triggered or own an agent cannot approve their own high-risk actions.
 
 ### Bounded Agent Runtime Loop
-- Hardcoded global iteration ceiling: $\min(\text{agent.max\_iterations}, 20)$ turns.
+- Hardcoded global iteration ceiling: `min(agent.max_iterations, 20)` turns.
 - Automatically halts runaways and infinite tool-calling loops.
 - Captures pinned execution context snapshots at initiation to prevent configuration drift during execution.
 
@@ -160,17 +160,23 @@ The platform includes an automated security evaluation suite featuring **18 adve
 
 ### Exact Empirical Formulas:
 
+| Metric | Formula | Target | Description |
+|---|---|:---:|---|
+| **ASR** (Attack Success Rate) | `Successful Attacks / Total Adversarial Attempts` | **0.0%** | Measures percentage of adversarial probes that bypassed defenses |
+| **UTER** (Unauthorized Tool Execution Rate) | `Unauthorized Tool Executions / Total Tool Execution Proposals` | **0.0%** | Verifies zero leaks or execution of non-permitted tools |
+| **LTSR** (Legitimate Task Success Rate) | `Legitimate Tasks Completed / Total Legitimate Tasks Tested` | **100.0%** | Ensures valid developer/user requests are not disrupted |
+| **FBR** (False Block Rate) | `Legitimate Actions Denied / Total Legitimate Action Proposals` | **0.0%** | Measures rate of valid actions falsely intercepted |
+| **Latency** | `p50`, `p95`, `max` (ms) | **< 1.0 ms** | Pure Python deterministic evaluation speed |
+
 $$\text{ASR} = \frac{\text{Successful Attacks}}{\text{Total Adversarial Attempts}}$$
 
 $$\text{UTER} = \frac{\text{Unauthorized Tool Executions}}{\text{Total Tool Execution Proposals}}$$
 
-$$\text{LTSR} = \frac{\text{Legitimate Tasks Completed Successfully}}{\text{Total Legitimate Tasks Tested}}$$
+$$\text{LTSR} = \frac{\text{Legitimate Tasks Completed}}{\text{Total Legitimate Tasks Tested}}$$
 
-$$\text{FBR} = \frac{\text{Legitimate Actions Incorrectly Denied}}{\text{Total Legitimate Action Proposals}}$$
+$$\text{FBR} = \frac{\text{Legitimate Actions Denied}}{\text{Total Legitimate Action Proposals}}$$
 
-$$\text{Policy Evaluation Latencies} = \{p50, p95, max\} \text{ (ms)}$$
-
-*(When denominators are zero, metric returns null rather than undefined).*
+> **Note on Zero Denominators:** When denominators are zero, metric formulas return `null` rather than division-by-zero or undefined.
 
 ---
 
