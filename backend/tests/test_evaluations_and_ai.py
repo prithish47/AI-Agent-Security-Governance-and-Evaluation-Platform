@@ -216,21 +216,36 @@ async def test_21_case_adversarial_benchmark_runner(eval_db: AsyncSession):
 
 @pytest.mark.asyncio
 async def test_evaluation_rest_api_endpoints(eval_client: AsyncClient):
-    """Test /api/v1/projects/{project_id}/evaluations REST endpoints."""
+    """Test /api/v1/projects/{project_id}/evaluations REST endpoints with auth."""
+    # 0. Register & authenticate
+    await eval_client.post(
+        "/api/v1/auth/register",
+        json={"email": "eval@example.com", "username": "eval_user", "password": "EvalPassword123!"},
+    )
+    login_res = await eval_client.post(
+        "/api/v1/auth/login",
+        json={"email": "eval@example.com", "password": "EvalPassword123!"},
+    )
+    headers = {"Authorization": f"Bearer {login_res.json()['access_token']}"}
+
     # 1. Create project & agent
-    p_res = await eval_client.post("/api/v1/projects", json={"name": "Eval API Project"})
+    p_res = await eval_client.post("/api/v1/projects", json={"name": "Eval API Project"}, headers=headers)
+    assert p_res.status_code == 201
     project_id = p_res.json()["id"]
 
     a_res = await eval_client.post(
         f"/api/v1/projects/{project_id}/agents",
         json={"name": "Eval Bot", "model_provider": "mock", "max_risk_level": "MEDIUM"},
+        headers=headers,
     )
+    assert a_res.status_code == 201
     agent_id = a_res.json()["id"]
 
     # 2. Trigger benchmark evaluation run
     run_res = await eval_client.post(
         f"/api/v1/projects/{project_id}/evaluations/run",
         json={"agent_id": agent_id, "mode": "both"},
+        headers=headers,
     )
     assert run_res.status_code == 201
     run_data = run_res.json()
@@ -240,12 +255,12 @@ async def test_evaluation_rest_api_endpoints(eval_client: AsyncClient):
     assert "protected" in run_data["metrics"]
 
     # 3. GET /evaluations/{eval_id}
-    get_res = await eval_client.get(f"/api/v1/evaluations/{eval_id}")
+    get_res = await eval_client.get(f"/api/v1/evaluations/{eval_id}", headers=headers)
     assert get_res.status_code == 200
     assert get_res.json()["id"] == eval_id
 
     # 4. GET /evaluations/{eval_id}/results
-    res_list = await eval_client.get(f"/api/v1/evaluations/{eval_id}/results")
+    res_list = await eval_client.get(f"/api/v1/evaluations/{eval_id}/results", headers=headers)
     assert res_list.status_code == 200
     results = res_list.json()
     assert len(results) == 21

@@ -10,10 +10,15 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.rbac import (
+    Permission,
+    get_authorized_resource,
+    get_current_user,
+    require_project_permission,
+)
 from app.core.database import get_db
-from app.core.exceptions import NotFoundError
 from app.evaluation.runner import EvaluationRunner
-from app.persistence.models import EvaluationMode, EvaluationResult, EvaluationRun
+from app.persistence.models import EvaluationMode, EvaluationResult, EvaluationRun, User
 
 router = APIRouter(tags=["Evaluations & Security Benchmarks"])
 
@@ -55,7 +60,11 @@ class EvaluationResultResponse(BaseModel):
 
 
 @router.get("/projects/{project_id}/evaluations", response_model=List[EvaluationRunResponse])
-async def list_project_evaluations(project_id: UUID, db: AsyncSession = Depends(get_db)):
+async def list_project_evaluations(
+    project_id: UUID,
+    _: User = Depends(require_project_permission(Permission.VIEW_DASHBOARD)),
+    db: AsyncSession = Depends(get_db),
+):
     """List all benchmark evaluation runs for a project."""
     stmt = select(EvaluationRun).where(EvaluationRun.project_id == project_id).order_by(EvaluationRun.started_at.desc())
     runs = list((await db.execute(stmt)).scalars().all())
@@ -64,7 +73,10 @@ async def list_project_evaluations(project_id: UUID, db: AsyncSession = Depends(
 
 @router.post("/projects/{project_id}/evaluations/run", response_model=EvaluationRunResponse, status_code=status.HTTP_201_CREATED)
 async def run_evaluation_benchmark(
-    project_id: UUID, run_in: EvaluationRunRequest, db: AsyncSession = Depends(get_db)
+    project_id: UUID,
+    run_in: EvaluationRunRequest,
+    current_user: User = Depends(require_project_permission(Permission.RUN_EVALUATIONS)),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Execute the 21-case adversarial and reliability security benchmark.
@@ -75,22 +87,32 @@ async def run_evaluation_benchmark(
         project_id=project_id,
         agent_id=run_in.agent_id,
         mode=run_in.mode,
+        actor_id=current_user.id,
     )
 
 
 @router.get("/evaluations/{evaluation_id}", response_model=EvaluationRunResponse)
-async def get_evaluation_run(evaluation_id: UUID, db: AsyncSession = Depends(get_db)):
+async def get_evaluation_run(
+    evaluation_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Get evaluation run status and comparison metrics."""
-    stmt = select(EvaluationRun).where(EvaluationRun.id == evaluation_id)
-    run = (await db.execute(stmt)).scalar_one_or_none()
-    if not run:
-        raise NotFoundError("EvaluationRun", str(evaluation_id))
-    return run
+    return await get_authorized_resource(
+        db, EvaluationRun, evaluation_id, "EvaluationRun", current_user, Permission.VIEW_DASHBOARD
+    )
 
 
 @router.get("/evaluations/{evaluation_id}/results", response_model=List[EvaluationResultResponse])
-async def get_evaluation_results(evaluation_id: UUID, db: AsyncSession = Depends(get_db)):
-    """Get detailed case-by-case benchmark results for a run."""
+async def get_evaluation_results(
+    evaluation_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get detailed case-by-case benchmark results for a run (scoped by project membership)."""
+    await get_authorized_resource(
+        db, EvaluationRun, evaluation_id, "EvaluationRun", current_user, Permission.VIEW_DASHBOARD
+    )
     stmt = select(EvaluationResult).where(EvaluationResult.run_id == evaluation_id).order_by(EvaluationResult.created_at.asc())
     results = list((await db.execute(stmt)).scalars().all())
     return results

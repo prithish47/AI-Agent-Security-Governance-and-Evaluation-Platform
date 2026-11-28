@@ -17,20 +17,23 @@
 
 import enum
 import uuid
-from typing import Optional, Set
+from typing import Optional, Set, Type, TypeVar
 from fastapi import Depends, Header
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.exceptions import ForbiddenError, UnauthorizedError
+from app.core.exceptions import ForbiddenError, NotFoundError, UnauthorizedError
 from app.core.security import decode_access_token
 from app.persistence.models import ProjectMember, ProjectRole, User
+
+T = TypeVar("T")
 
 
 class Permission(str, enum.Enum):
     """Fine-grained application capabilities."""
     DELETE_PROJECT = "delete_project"
+    MANAGE_PROJECT = "manage_project"
     MANAGE_MEMBERS = "manage_members"
     MANAGE_POLICIES = "manage_policies"
     MANAGE_AGENTS = "manage_agents"
@@ -46,6 +49,7 @@ class Permission(str, enum.Enum):
 ROLE_PERMISSIONS: dict[ProjectRole, Set[Permission]] = {
     ProjectRole.OWNER: {
         Permission.DELETE_PROJECT,
+        Permission.MANAGE_PROJECT,
         Permission.MANAGE_MEMBERS,
         Permission.MANAGE_POLICIES,
         Permission.MANAGE_AGENTS,
@@ -57,6 +61,7 @@ ROLE_PERMISSIONS: dict[ProjectRole, Set[Permission]] = {
         Permission.VIEW_AUDIT_LOGS,
     },
     ProjectRole.ADMIN: {
+        Permission.MANAGE_PROJECT,
         Permission.MANAGE_MEMBERS,
         Permission.MANAGE_POLICIES,
         Permission.MANAGE_AGENTS,
@@ -104,8 +109,13 @@ async def get_current_user(
         raise UnauthorizedError("Missing or invalid Authorization header")
 
     token = authorization.split(" ", 1)[1].strip()
+    if not token:
+        raise UnauthorizedError("Missing access token")
     payload = decode_access_token(token)
-    user_id = uuid.UUID(payload["sub"])
+    try:
+        user_id = uuid.UUID(payload["sub"])
+    except (KeyError, ValueError, TypeError):
+        raise UnauthorizedError("Invalid token subject")
 
     stmt = select(User).where(User.id == user_id)
     user = (await db.execute(stmt)).scalar_one_or_none()
@@ -146,3 +156,39 @@ async def verify_project_permission(
             f"Role '{member.role.value}' does not have permission '{permission.value}' in project '{project_id}'"
         )
     return member
+
+
+def require_project_permission(permission: Permission):
+    """
+    FastAPI dependency factory for routes with a `project_id` path parameter.
+    Authenticates caller, verifies project membership, and checks the required permission.
+    """
+    async def _checker(
+        project_id: uuid.UUID,
+        current_user: User = Depends(get_current_user),
+        db: AsyncSession = Depends(get_db),
+    ) -> User:
+        await verify_project_permission(project_id, current_user, permission, db)
+        return current_user
+
+    return _checker
+
+
+async def get_authorized_resource(
+    db: AsyncSession,
+    model_cls: Type[T],
+    resource_id: uuid.UUID,
+    resource_name: str,
+    user: User,
+    permission: Permission,
+) -> T:
+    """
+    Fetch a project-owned resource by ID and enforce caller RBAC on its project.
+    Raises NotFoundError if absent, or ForbiddenError if caller lacks permission.
+    """
+    stmt = select(model_cls).where(model_cls.id == resource_id)  # type: ignore[attr-defined]
+    resource = (await db.execute(stmt)).scalar_one_or_none()
+    if not resource:
+        raise NotFoundError(resource_name, str(resource_id))
+    await verify_project_permission(resource.project_id, user, permission, db)  # type: ignore[attr-defined]
+    return resource

@@ -8,11 +8,12 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import get_db
 from app.audit import service as audit_service
 from app.audit.schemas import AuditEventResponse
+from app.auth.rbac import Permission, require_project_permission
+from app.core.database import get_db
+from app.persistence.models import AuditSeverity, User
 from app.schemas.common import PaginatedResponse
-from app.persistence.models import AuditSeverity
 
 router = APIRouter(tags=["Audit Logs"])
 
@@ -28,6 +29,7 @@ async def list_audit_logs(
     end_date: Optional[datetime] = Query(None, description="Filter until timestamp"),
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(50, ge=1, le=100, description="Page size"),
+    _: User = Depends(require_project_permission(Permission.VIEW_AUDIT_LOGS)),
     db: AsyncSession = Depends(get_db),
 ):
     """Query append-only security audit events for a project."""

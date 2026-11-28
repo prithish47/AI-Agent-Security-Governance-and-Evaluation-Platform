@@ -54,10 +54,20 @@ class EvaluationRunner:
         project_id: uuid.UUID,
         agent_id: uuid.UUID,
         mode: EvaluationMode = EvaluationMode.BOTH,
+        actor_id: Optional[uuid.UUID] = None,
     ) -> EvaluationRun:
         """
         Run the 21-case evaluation suite against the specified agent.
         """
+        # Enforce project-agent tenant isolation before touching suite/run records
+        agent_check = (
+            await db.execute(
+                select(Agent).where(Agent.id == agent_id, Agent.project_id == project_id)
+            )
+        ).scalar_one_or_none()
+        if not agent_check:
+            raise NotFoundError("Agent", str(agent_id))
+
         # Fetch or create default evaluation suite for project
         stmt = select(EvaluationSuite).where(
             EvaluationSuite.project_id == project_id,
@@ -273,6 +283,7 @@ class EvaluationRunner:
             db,
             AuditEventCreate(
                 project_id=project_id,
+                actor_id=actor_id,
                 event_type="EVALUATION_COMPLETED",
                 severity=AuditSeverity.INFO,
                 event_metadata={

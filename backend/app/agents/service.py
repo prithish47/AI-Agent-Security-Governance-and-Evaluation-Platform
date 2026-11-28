@@ -8,8 +8,20 @@ from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ConflictError
-from app.persistence.models import Agent, AgentToolAssignment, ToolDefinition
+from app.persistence.models import Agent, AgentToolAssignment, SecurityPolicy, ToolDefinition
 from app.agents.schemas import AgentCreate, AgentUpdate
+
+
+async def _verify_policy_in_project(
+    db: AsyncSession, policy_id: uuid.UUID, project_id: uuid.UUID
+) -> None:
+    """Ensure referenced policy exists and belongs to the same project (tenant isolation)."""
+    stmt = select(SecurityPolicy).where(
+        SecurityPolicy.id == policy_id,
+        SecurityPolicy.project_id == project_id,
+    )
+    if not (await db.execute(stmt)).scalar_one_or_none():
+        raise NotFoundError("SecurityPolicy", str(policy_id))
 
 
 async def create_agent(
@@ -20,6 +32,9 @@ async def create_agent(
     existing = (await db.execute(stmt)).scalar_one_or_none()
     if existing:
         raise ConflictError(f"Agent with name '{agent_in.name}' already exists in this project")
+
+    if agent_in.policy_id is not None:
+        await _verify_policy_in_project(db, agent_in.policy_id, project_id)
 
     agent = Agent(
         project_id=project_id,
@@ -84,6 +99,7 @@ async def update_agent(
     if agent_in.max_risk_level is not None:
         agent.max_risk_level = agent_in.max_risk_level
     if agent_in.policy_id is not None:
+        await _verify_policy_in_project(db, agent_in.policy_id, agent.project_id)
         agent.policy_id = agent_in.policy_id
     if agent_in.is_enabled is not None:
         agent.is_enabled = agent_in.is_enabled

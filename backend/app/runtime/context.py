@@ -60,7 +60,10 @@ async def create_pinned_context(
     if agent.policy_id:
         policy = (
             await db.execute(
-                select(SecurityPolicy).where(SecurityPolicy.id == agent.policy_id)
+                select(SecurityPolicy).where(
+                    SecurityPolicy.id == agent.policy_id,
+                    SecurityPolicy.project_id == agent.project_id,
+                )
             )
         ).scalar_one_or_none()
 

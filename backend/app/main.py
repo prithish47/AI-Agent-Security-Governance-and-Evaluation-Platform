@@ -19,11 +19,22 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.core.config import settings
 from app.core.database import engine, Base
+from app.core.exceptions import (
+    AgentGuardError,
+    ConflictError,
+    ForbiddenError,
+    NotFoundError,
+    PolicyDeniedError,
+    SecurityViolationError,
+    UnauthorizedError,
+    ValidationError,
+)
 from app.api.v1.router import api_router
 
 # Configure structured logging
@@ -56,6 +67,9 @@ async def lifespan(app: FastAPI):
     logger.info(f"Starting {settings.app_name} v{settings.app_version}")
     logger.info(f"Debug mode: {settings.debug}")
     logger.info(f"CORS origins: {settings.cors_origins}")
+
+    if not settings.debug and settings.secret_key == "dev-secret-key-CHANGE-IN-PRODUCTION":
+        raise RuntimeError("Insecure default SECRET_KEY is not allowed when DEBUG is false")
     
     # Verify database connectivity by attempting a simple connection
     try:
@@ -111,6 +125,33 @@ app.add_middleware(
     allow_methods=["*"],     # Allow all HTTP methods
     allow_headers=["*"],     # Allow all headers
 )
+
+
+# =============================================================================
+# Domain Exception Handlers
+# =============================================================================
+
+_EXCEPTION_STATUS_MAP = {
+    UnauthorizedError: 401,
+    ForbiddenError: 403,
+    SecurityViolationError: 403,
+    PolicyDeniedError: 403,
+    NotFoundError: 404,
+    ConflictError: 409,
+    ValidationError: 400,
+}
+
+
+@app.exception_handler(AgentGuardError)
+async def agentguard_exception_handler(request: Request, exc: AgentGuardError):
+    """Map domain exceptions to consistent HTTP status codes and JSON payloads."""
+    status_code = _EXCEPTION_STATUS_MAP.get(type(exc), 500)
+    headers = {"WWW-Authenticate": "Bearer"} if status_code == 401 else None
+    return JSONResponse(
+        status_code=status_code,
+        content={"detail": {"code": exc.code, "message": exc.message}},
+        headers=headers,
+    )
 
 
 # =============================================================================

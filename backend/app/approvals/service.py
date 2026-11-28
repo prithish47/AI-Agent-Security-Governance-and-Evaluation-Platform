@@ -19,6 +19,7 @@ from app.audit import service as audit_service
 from app.audit.schemas import AuditEventCreate
 from app.core.exceptions import (
     ConflictError,
+    ForbiddenError,
     NotFoundError,
     SecurityViolationError,
     ValidationError,
@@ -53,6 +54,40 @@ async def list_project_approvals(
     return list(result.scalars().all())
 
 
+async def _enforce_separation_of_duties(
+    db: AsyncSession,
+    approval: ApprovalRequest,
+    actor_id: Optional[uuid.UUID],
+    action: str,
+) -> Optional[Execution]:
+    """
+    Prevent an execution initiator from approving, rejecting, or resuming their own action.
+    Returns the associated Execution record if found.
+    """
+    exec_stmt = select(Execution).where(Execution.id == approval.execution_id)
+    execution = (await db.execute(exec_stmt)).scalar_one_or_none()
+    if execution and execution.user_id and actor_id and execution.user_id == actor_id:
+        await audit_service.record_audit_event(
+            db,
+            AuditEventCreate(
+                project_id=approval.project_id,
+                actor_id=actor_id,
+                execution_id=approval.execution_id,
+                event_type="APPROVAL_SELF_REVIEW_BLOCKED",
+                severity=AuditSeverity.WARNING,
+                event_metadata={
+                    "approval_id": str(approval.id),
+                    "action": action,
+                    "reason": f"Initiator attempted to {action} their own execution action",
+                },
+            ),
+        )
+        raise ForbiddenError(
+            f"Separation of duties violation: execution initiator cannot {action} their own action"
+        )
+    return execution
+
+
 async def approve_request(
     db: AsyncSession,
     approval_id: uuid.UUID,
@@ -64,6 +99,8 @@ async def approve_request(
 
     if approval.status != ApprovalStatus.PENDING:
         raise ConflictError(f"Approval is in state '{approval.status.value}', expected 'PENDING'")
+
+    await _enforce_separation_of_duties(db, approval, reviewer_id, "approve")
 
     # Cryptographic integrity check: Verify action_hash matches stored arguments
     if not verify_action_hash(approval.tool_name, approval.tool_arguments, approval.action_hash):
@@ -121,14 +158,14 @@ async def reject_request(
     if approval.status != ApprovalStatus.PENDING:
         raise ConflictError(f"Approval is in state '{approval.status.value}', expected 'PENDING'")
 
+    execution = await _enforce_separation_of_duties(db, approval, reviewer_id, "reject")
+
     approval.status = ApprovalStatus.REJECTED
     approval.reviewed_by = reviewer_id
     approval.review_note = note
     approval.reviewed_at = datetime.now(timezone.utc)
 
     # Terminate execution as DENIED
-    stmt = select(Execution).where(Execution.id == approval.execution_id)
-    execution = (await db.execute(stmt)).scalar_one_or_none()
     if execution:
         execution.status = ExecutionStatus.DENIED
         execution.termination_reason = f"Human reviewer rejected action: {note or 'No reason provided'}"
@@ -152,15 +189,22 @@ async def reject_request(
 
 
 async def resume_and_consume_approval(
-    db: AsyncSession, approval_id: uuid.UUID
+    db: AsyncSession,
+    approval_id: uuid.UUID,
+    actor_id: Optional[uuid.UUID] = None,
 ) -> Execution:
     """
     ATOMIC SINGLE-USE CONSUMPTION & EXECUTION RESUMPTION:
-    1. Atomically transitions status APPROVED -> CONSUMED.
-    2. Re-verifies cryptographic SHA-256 action hash.
-    3. Executes the approved tool from the safe catalog.
-    4. Updates Execution status to COMPLETED.
+    1. Enforces separation of duties before consuming.
+    2. Atomically transitions status APPROVED -> CONSUMED.
+    3. Re-verifies cryptographic SHA-256 action hash.
+    4. Executes the approved tool from the safe catalog.
+    5. Updates Execution status to COMPLETED.
     """
+    # 0. Pre-check separation of duties before atomic state transition
+    pre_approval = await get_approval(db, approval_id)
+    await _enforce_separation_of_duties(db, pre_approval, actor_id, "resume")
+
     # 1. Atomic consumption query (prevents double execution)
     stmt = (
         update(ApprovalRequest)
@@ -228,6 +272,7 @@ async def resume_and_consume_approval(
         db,
         AuditEventCreate(
             project_id=consumed_approval.project_id,
+            actor_id=actor_id,
             execution_id=execution.id,
             event_type="APPROVAL_CONSUMED",
             severity=AuditSeverity.INFO,

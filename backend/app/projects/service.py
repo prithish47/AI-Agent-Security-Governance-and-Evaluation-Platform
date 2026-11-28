@@ -84,7 +84,13 @@ async def add_project_member(
     db: AsyncSession, project_id: uuid.UUID, member_in: ProjectMemberCreate
 ) -> ProjectMember:
     await get_project(db, project_id)
-    
+
+    # Verify target user exists
+    user_stmt = select(User).where(User.id == member_in.user_id)
+    target_user = (await db.execute(user_stmt)).scalar_one_or_none()
+    if not target_user:
+        raise NotFoundError("User", str(member_in.user_id))
+
     # Check if already a member
     stmt = select(ProjectMember).where(
         ProjectMember.project_id == project_id,
