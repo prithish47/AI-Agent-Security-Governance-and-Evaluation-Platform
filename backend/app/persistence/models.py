@@ -128,13 +128,16 @@ class User(Base):
 
 
 class RefreshToken(Base):
-    """Hashed refresh tokens for secure JWT refresh with revocation capability."""
+    """Hashed refresh tokens for secure JWT refresh with rotation and family revocation."""
     __tablename__ = "refresh_tokens"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    family_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, default=uuid.uuid4, index=True)
     token_hash: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
     is_revoked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    replaced_by_token_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, nullable=True)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 

@@ -2,6 +2,7 @@
 # AgentGuard — HTTP Authentication, Project RBAC & Tenant Isolation Tests
 # =============================================================================
 
+import asyncio
 import uuid
 from datetime import timedelta
 
@@ -226,41 +227,91 @@ async def test_cross_project_tenant_isolation_over_http(sec_env):
         )
     ).json()
 
-    # Alice attempts to access Project B across all project-path and by-ID routes -> 403
-    forbidden_gets = [
+    # Alice attempts to access Project B project-scoped endpoints -> 403
+    project_scoped_forbidden = [
         f"/api/v1/projects/{pid_b}",
         f"/api/v1/projects/{pid_b}/members",
         f"/api/v1/projects/{pid_b}/agents",
-        f"/api/v1/agents/{agent_b['id']}",
         f"/api/v1/projects/{pid_b}/tools",
-        f"/api/v1/tools/{tool_b['id']}",
         f"/api/v1/projects/{pid_b}/policies",
+        f"/api/v1/projects/{pid_b}/approvals",
+        f"/api/v1/projects/{pid_b}/evaluations",
+        f"/api/v1/projects/{pid_b}/audit-logs",
+    ]
+    for path in project_scoped_forbidden:
+        res = await client.get(path, headers=_auth(token_a))
+        assert res.status_code == 403, f"Cross-project GET {path} returned {res.status_code}"
+
+    # Alice attempts unauthorized resource enumeration across Project B by-ID routes -> 404 (matches nonexistent UUIDs)
+    anti_enum_gets = [
+        f"/api/v1/agents/{agent_b['id']}",
+        f"/api/v1/tools/{tool_b['id']}",
         f"/api/v1/policies/{pol_b['id']}",
         f"/api/v1/policies/{pol_b['id']}/versions",
         f"/api/v1/executions/{exec_b['id']}",
         f"/api/v1/executions/{exec_b['id']}/trace",
-        f"/api/v1/projects/{pid_b}/approvals",
         f"/api/v1/approvals/{appr_b_id}",
-        f"/api/v1/projects/{pid_b}/evaluations",
         f"/api/v1/evaluations/{eval_b['id']}",
         f"/api/v1/evaluations/{eval_b['id']}/results",
-        f"/api/v1/projects/{pid_b}/audit-logs",
     ]
-    for path in forbidden_gets:
-        res = await client.get(path, headers=_auth(token_a))
-        assert res.status_code == 403, f"Cross-project GET {path} returned {res.status_code}"
+    nonexistent_id = str(uuid.uuid4())
+    for path in anti_enum_gets:
+        res_foreign = await client.get(path, headers=_auth(token_a))
+        assert res_foreign.status_code == 404, f"Cross-project GET {path} leaked existence with {res_foreign.status_code}"
+    # Verify nonexistent resource returns identical 404 status/shape
+    assert (await client.get(f"/api/v1/agents/{nonexistent_id}", headers=_auth(token_a))).status_code == 404
 
-    # Alice attempts mutations / executions / approvals on Project B -> 403
+    # Alice attempts mutations / executions / approvals on Project B -> 403 on project routes, 404 on by-ID routes
     assert (await client.patch(f"/api/v1/projects/{pid_b}", json={"name": "Hacked"}, headers=_auth(token_a))).status_code == 403
     assert (await client.delete(f"/api/v1/projects/{pid_b}", headers=_auth(token_a))).status_code == 403
-    assert (await client.post(f"/api/v1/agents/{agent_b['id']}/execute", json={"task": "hi"}, headers=_auth(token_a))).status_code == 403
-    assert (await client.post(f"/api/v1/approvals/{appr_b_id}/approve", json={"note": "pwn"}, headers=_auth(token_a))).status_code == 403
-    assert (await client.post(f"/api/v1/approvals/{appr_b_id}/reject", json={"note": "pwn"}, headers=_auth(token_a))).status_code == 403
-    assert (await client.post(f"/api/v1/approvals/{appr_b_id}/resume", headers=_auth(token_a))).status_code == 403
-    assert (await client.delete(f"/api/v1/tools/{tool_b['id']}", headers=_auth(token_a))).status_code == 403
-    assert (await client.post(f"/api/v1/policies/{pol_b['id']}/versions", json={"rules": {}}, headers=_auth(token_a))).status_code == 403
+    assert (await client.post(f"/api/v1/agents/{agent_b['id']}/execute", json={"task": "hi"}, headers=_auth(token_a))).status_code == 404
+    assert (await client.post(f"/api/v1/approvals/{appr_b_id}/approve", json={"note": "pwn"}, headers=_auth(token_a))).status_code == 404
+    assert (await client.post(f"/api/v1/approvals/{appr_b_id}/reject", json={"note": "pwn"}, headers=_auth(token_a))).status_code == 404
+    assert (await client.post(f"/api/v1/approvals/{appr_b_id}/resume", headers=_auth(token_a))).status_code == 404
+    assert (await client.delete(f"/api/v1/tools/{tool_b['id']}", headers=_auth(token_a))).status_code == 404
+    assert (await client.post(f"/api/v1/policies/{pol_b['id']}/versions", json={"rules": {}}, headers=_auth(token_a))).status_code == 404
 
-    # Cross-project resource association attempts by Alice in Project A referencing Project B UUIDs -> rejected
+    # Nested cross-project resource access attempts by Alice using Project A resources + Project B child IDs -> 404
+    agent_a = (
+        await client.post(
+            f"/api/v1/projects/{pid_a}/agents",
+            json={"name": "Alpha Bot"},
+            headers=_auth(token_a),
+        )
+    ).json()
+    pol_a = (
+        await client.post(
+            f"/api/v1/projects/{pid_a}/policies",
+            json={"name": "Alpha Policy", "rules": {}},
+            headers=_auth(token_a),
+        )
+    ).json()
+    pol_b_versions = (
+        await client.get(f"/api/v1/policies/{pol_b['id']}/versions", headers=_auth(token_b))
+    ).json()
+
+    assert (
+        await client.post(
+            f"/api/v1/agents/{agent_a['id']}/tools",
+            json={"tool_id": tool_b["id"]},
+            headers=_auth(token_a),
+        )
+    ).status_code == 404
+    assert (
+        await client.delete(
+            f"/api/v1/agents/{agent_a['id']}/tools/{tool_b['id']}",
+            headers=_auth(token_a),
+        )
+    ).status_code == 404
+    assert (
+        await client.post(
+            f"/api/v1/policies/{pol_a['id']}/activate",
+            json={"version_id": pol_b_versions[0]["id"]},
+            headers=_auth(token_a),
+        )
+    ).status_code == 404
+
+    # Cross-project resource association attempts by Alice in Project A referencing Project B UUIDs -> rejected (404)
     cross_agent = await client.post(
         f"/api/v1/projects/{pid_a}/agents",
         json={"name": "Cross Policy Bot", "policy_id": pol_b["id"]},
@@ -439,3 +490,80 @@ async def test_role_permissions_and_approval_separation_of_duties(sec_env):
     # ADMIN cannot DELETE project (403), OWNER can DELETE project (204)
     assert (await client.delete(f"/api/v1/projects/{pid}", headers=_auth(admin_tok))).status_code == 403
     assert (await client.delete(f"/api/v1/projects/{pid}", headers=_auth(owner_tok))).status_code == 204
+
+
+@pytest.mark.asyncio
+async def test_refresh_token_rotation_reuse_detection_and_logout(sec_env):
+    """
+    Verify full refresh-token rotation lifecycle:
+    1. Expired access token returns 401; refresh issues new access + rotated refresh token.
+    2. Reusing an already-rotated refresh token fails (401) and revokes the entire session family.
+    3. Logout revokes the active session family so subsequent refreshes fail (401).
+    """
+    client, _ = sec_env
+    user_id, _ = await _create_user(client, "rot@example.com", "rot_user")
+
+    login_res = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "rot@example.com", "password": "StrongPassword!123"},
+    )
+    assert login_res.status_code == 200
+    refresh_1 = login_res.json()["refresh_token"]
+
+    # Expired access token fails 401 -> refresh succeeds and rotates token
+    expired_access = create_access_token(
+        uuid.UUID(user_id), "rot@example.com", "rot_user", expires_delta=timedelta(seconds=-5)
+    )
+    assert (await client.get("/api/v1/projects", headers=_auth(expired_access))).status_code == 401
+
+    rot_res = await client.post("/api/v1/auth/refresh", json={"refresh_token": refresh_1})
+    assert rot_res.status_code == 200
+    access_2 = rot_res.json()["access_token"]
+    refresh_2 = rot_res.json()["refresh_token"]
+    assert refresh_2 != refresh_1
+    assert (await client.get("/api/v1/projects", headers=_auth(access_2))).status_code == 200
+
+    # Reuse of old refresh_1 -> 401 AND revokes entire family (invalidating refresh_2 too!)
+    reuse_res = await client.post("/api/v1/auth/refresh", json={"refresh_token": refresh_1})
+    assert reuse_res.status_code == 401
+
+    family_revoked_res = await client.post("/api/v1/auth/refresh", json={"refresh_token": refresh_2})
+    assert family_revoked_res.status_code == 401
+
+    # Fresh login -> logout revokes session family
+    login_2 = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "rot@example.com", "password": "StrongPassword!123"},
+    )
+    refresh_3 = login_2.json()["refresh_token"]
+    assert (await client.post("/api/v1/auth/logout", json={"refresh_token": refresh_3})).status_code == 200
+    assert (await client.post("/api/v1/auth/refresh", json={"refresh_token": refresh_3})).status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_concurrent_refresh_requests_atomic_single_use(sec_env):
+    """Verify concurrent refresh requests with the same token cannot both succeed."""
+    client, _ = sec_env
+    await _create_user(client, "race@example.com", "race_user")
+
+    login_res = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "race@example.com", "password": "StrongPassword!123"},
+    )
+    assert login_res.status_code == 200
+    refresh_token = login_res.json()["refresh_token"]
+
+    responses = await asyncio.gather(
+        *[
+            client.post("/api/v1/auth/refresh", json={"refresh_token": refresh_token})
+            for _ in range(5)
+        ]
+    )
+    successes = [r for r in responses if r.status_code == 200]
+    failures = [r for r in responses if r.status_code == 401]
+
+    # Exactly one concurrent caller wins atomic rotation; all others are rejected 401
+    assert len(successes) == 1
+    assert len(failures) == 4
+    rotated_tokens = {r.json()["refresh_token"] for r in successes}
+    assert refresh_token not in rotated_tokens

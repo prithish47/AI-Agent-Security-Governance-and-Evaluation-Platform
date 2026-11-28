@@ -184,11 +184,26 @@ async def get_authorized_resource(
 ) -> T:
     """
     Fetch a project-owned resource by ID and enforce caller RBAC on its project.
-    Raises NotFoundError if absent, or ForbiddenError if caller lacks permission.
+    - Returns 404 NotFoundError if the resource does not exist OR caller is not a member
+      of its owning project (prevents cross-tenant UUID enumeration).
+    - Returns 403 ForbiddenError if caller IS a member of the owning project but
+      lacks the required RBAC permission.
     """
     stmt = select(model_cls).where(model_cls.id == resource_id)  # type: ignore[attr-defined]
     resource = (await db.execute(stmt)).scalar_one_or_none()
     if not resource:
         raise NotFoundError(resource_name, str(resource_id))
-    await verify_project_permission(resource.project_id, user, permission, db)  # type: ignore[attr-defined]
+
+    member_stmt = select(ProjectMember).where(
+        ProjectMember.project_id == resource.project_id,  # type: ignore[attr-defined]
+        ProjectMember.user_id == user.id,
+    )
+    member = (await db.execute(member_stmt)).scalar_one_or_none()
+    if not member:
+        raise NotFoundError(resource_name, str(resource_id))
+
+    if not has_permission(member.role, permission):
+        raise ForbiddenError(
+            f"Role '{member.role.value}' does not have permission '{permission.value}' in project '{resource.project_id}'"  # type: ignore[attr-defined]
+        )
     return resource

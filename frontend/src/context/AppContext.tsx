@@ -4,8 +4,15 @@
 
 "use client";
 
-import React, { createContext, useContext, useEffect, useState } from "react";
-import api, { ApiError } from "@/lib/api-client";
+import React, { createContext, useCallback, useContext, useEffect, useState } from "react";
+import api, {
+  clearSessionTokens,
+  getAccessToken,
+  getRefreshToken,
+  hasRefreshToken,
+  setAuthFailureHandler,
+  setSessionTokens,
+} from "@/lib/api-client";
 import { Project, User } from "@/types";
 
 interface ToastNotification {
@@ -16,6 +23,7 @@ interface ToastNotification {
 
 interface AppContextType {
   user: User | null;
+  authLoading: boolean;
   projects: Project[];
   activeProject: Project | null;
   pendingApprovalsCount: number;
@@ -34,72 +42,126 @@ const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export function AppProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState<boolean>(true);
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProject, setActiveProject] = useState<Project | null>(null);
   const [pendingApprovalsCount, setPendingApprovalsCount] = useState<number>(0);
   const [activeView, setActiveView] = useState<string>("overview");
   const [toasts, setToasts] = useState<ToastNotification[]>([]);
 
-  const showToast = (message: string, type: "success" | "error" | "info" | "warning" = "info") => {
-    const id = Math.random().toString(36).substring(2, 9);
-    setToasts((prev) => [...prev, { id, type, message }]);
-    setTimeout(() => {
-      setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, 4000);
-  };
+  const showToast = useCallback(
+    (message: string, type: "success" | "error" | "info" | "warning" = "info") => {
+      const id = Math.random().toString(36).substring(2, 9);
+      setToasts((prev) => [...prev, { id, type, message }]);
+      setTimeout(() => {
+        setToasts((prev) => prev.filter((t) => t.id !== id));
+      }, 4000);
+    },
+    []
+  );
 
-  const refreshPendingApprovals = async () => {
-    if (!activeProject) return;
+  const clearAuthState = useCallback(() => {
+    clearSessionTokens();
+    setUser(null);
+    setProjects([]);
+    setActiveProject(null);
+    setPendingApprovalsCount(0);
+    setActiveView("overview");
+  }, []);
+
+  const refreshPendingApprovals = useCallback(async () => {
+    if (!user || !activeProject) {
+      setPendingApprovalsCount(0);
+      return;
+    }
     try {
       const approvals = await api.listApprovals(activeProject.id, "PENDING");
       setPendingApprovalsCount(approvals.length);
     } catch {
-      // Ignored
+      // Ignored (401 handled globally by api-client authFailureHandler)
     }
-  };
+  }, [user, activeProject]);
 
-  const refreshProjects = async () => {
+  const refreshProjects = useCallback(async () => {
+    if (!getAccessToken() && !hasRefreshToken()) {
+      return;
+    }
     try {
       const list = await api.listProjects();
       setProjects(list);
-      if (list.length > 0 && !activeProject) {
-        setActiveProject(list[0]);
-      }
-    } catch (err: any) {
-      // Handle
-    }
-  };
-
-  useEffect(() => {
-    // Check if authenticated
-    const token = typeof window !== "undefined" ? localStorage.getItem("ag_access_token") : null;
-    if (token) {
-      api
-        .getMe()
-        .then((u) => {
-          setUser(u);
-          refreshProjects();
-        })
-        .catch(() => {
-          localStorage.removeItem("ag_access_token");
-          localStorage.removeItem("ag_refresh_token");
-        });
-    } else {
-      // Load public project list
-      refreshProjects();
+      setActiveProject((prev) => {
+        if (list.length === 0) return null;
+        if (prev && list.some((p) => p.id === prev.id)) return prev;
+        return list[0];
+      });
+    } catch {
+      // Handled via global 401/error handling
     }
   }, []);
 
   useEffect(() => {
-    if (activeProject) {
-      refreshPendingApprovals();
+    setAuthFailureHandler(() => {
+      clearAuthState();
+      showToast("Session expired. Please sign in again.", "warning");
+    });
+    return () => setAuthFailureHandler(null);
+  }, [clearAuthState, showToast]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function bootstrapSession() {
+      // Unauthenticated visitors must not trigger protected API requests
+      if (!getAccessToken() && !hasRefreshToken()) {
+        clearSessionTokens();
+        if (!cancelled) setAuthLoading(false);
+        return;
+      }
+
+      try {
+        if (!getAccessToken() && hasRefreshToken()) {
+          const refreshed = await api.refresh();
+          if (!refreshed) {
+            if (!cancelled) {
+              clearAuthState();
+              setAuthLoading(false);
+            }
+            return;
+          }
+        }
+
+        const me = await api.getMe();
+        if (cancelled) return;
+        setUser(me);
+        await refreshProjects();
+      } catch {
+        if (!cancelled) {
+          clearAuthState();
+        }
+      } finally {
+        if (!cancelled) {
+          setAuthLoading(false);
+        }
+      }
     }
-  }, [activeProject]);
+
+    bootstrapSession();
+    return () => {
+      cancelled = true;
+    };
+  }, [clearAuthState, refreshProjects]);
+
+  useEffect(() => {
+    if (user && activeProject) {
+      refreshPendingApprovals();
+    } else {
+      setPendingApprovalsCount(0);
+    }
+  }, [user, activeProject, refreshPendingApprovals]);
 
   const loginUser = async (email: string, password: string) => {
     const res = await api.login({ email, password });
-    localStorage.setItem("ag_access_token", res.access_token);
-    localStorage.setItem("ag_refresh_token", res.refresh_token);
+    setSessionTokens(res.access_token, res.refresh_token);
     const u = await api.getMe();
     setUser(u);
     await refreshProjects();
@@ -112,20 +174,22 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   };
 
   const logoutUser = async () => {
-    const refresh = localStorage.getItem("ag_refresh_token");
-    if (refresh) {
-      await api.logout(refresh).catch(() => {});
+    const refresh = getRefreshToken();
+    try {
+      if (refresh) {
+        await api.logout(refresh).catch(() => {});
+      }
+    } finally {
+      clearAuthState();
+      showToast("Signed out successfully", "info");
     }
-    localStorage.removeItem("ag_access_token");
-    localStorage.removeItem("ag_refresh_token");
-    setUser(null);
-    showToast("Signed out successfully", "info");
   };
 
   return (
     <AppContext.Provider
       value={{
         user,
+        authLoading,
         projects,
         activeProject,
         pendingApprovalsCount,

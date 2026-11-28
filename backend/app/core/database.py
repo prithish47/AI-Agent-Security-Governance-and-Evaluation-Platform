@@ -40,11 +40,14 @@ from app.core.config import settings
 # echo: If True, logs every SQL statement (useful for debugging)
 # =============================================================================
 
+_engine_kwargs: dict = {"echo": settings.debug}  # Log SQL in debug mode — disable in production
+if not settings.database_url.startswith("sqlite"):
+    _engine_kwargs["pool_size"] = 5
+    _engine_kwargs["max_overflow"] = 10
+
 engine = create_async_engine(
     settings.database_url,
-    echo=settings.debug,  # Log SQL in debug mode — disable in production
-    pool_size=5,
-    max_overflow=10,
+    **_engine_kwargs,
 )
 
 

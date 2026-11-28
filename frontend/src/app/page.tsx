@@ -9,6 +9,7 @@ import { AppProvider, useApp } from "@/context/AppContext";
 import Sidebar from "@/components/Sidebar";
 import TopNav from "@/components/TopNav";
 import AuthModal from "@/components/AuthModal";
+import { Loader2, Shield } from "lucide-react";
 
 // Views
 import OverviewView from "@/components/views/OverviewView";
@@ -23,8 +24,33 @@ import AuditLogsView from "@/components/views/AuditLogsView";
 import SettingsView from "@/components/views/SettingsView";
 
 function DashboardContent() {
-  const { activeView } = useApp();
+  const { user, authLoading, activeView } = useApp();
   const [authModalOpen, setAuthModalOpen] = useState(false);
+
+  if (authLoading) {
+    return (
+      <div className="flex h-screen bg-zinc-950 text-zinc-100 items-center justify-center">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-12 h-12 rounded-2xl bg-blue-600/15 border border-blue-500/30 flex items-center justify-center text-blue-400">
+            <Shield className="w-6 h-6" />
+          </div>
+          <div className="flex items-center gap-2 text-sm text-zinc-400">
+            <Loader2 className="w-4 h-4 animate-spin text-blue-500" />
+            <span>Verifying session...</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // When unauthenticated, do not mount protected dashboard views or trigger project API requests
+  if (!user) {
+    return (
+      <div className="flex h-screen bg-zinc-950 text-zinc-100 items-center justify-center">
+        <AuthModal isOpen={true} requireAuth={true} onClose={() => setAuthModalOpen(false)} />
+      </div>
+    );
+  }
 
   const renderActiveView = () => {
     switch (activeView) {

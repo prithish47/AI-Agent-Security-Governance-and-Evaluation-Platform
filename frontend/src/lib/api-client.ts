@@ -1,8 +1,19 @@
 // =============================================================================
 // AgentGuard — Comprehensive Typed API Client
 // =============================================================================
+// Token Storage Design & Security Trade-Offs:
+// - Short-lived access tokens are held strictly in JavaScript memory (never
+//   persisted to localStorage) to prevent long-lived storage exposure.
+// - Rotating refresh tokens are stored in per-tab sessionStorage so page
+//   reloads within the same tab restore the session via /api/v1/auth/refresh,
+//   while separate tabs maintain independent session families (avoiding false
+//   rotation reuse collisions) and closing the tab clears the refresh token.
+// - Note: Because frontend (localhost:3000) and backend (localhost:8000) run on
+//   separate origins with Bearer auth, HttpOnly cookies are not used yet; XSS
+//   mitigation (CSP, sanitization) remains essential while tokens exist in JS.
+// =============================================================================
 
-import {
+import type {
   Agent,
   ApprovalRequest,
   AuditEvent,
@@ -19,6 +30,8 @@ import {
 } from "@/types";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const REFRESH_STORAGE_KEY = "ag_refresh_token";
+const LEGACY_ACCESS_STORAGE_KEY = "ag_access_token";
 
 export class ApiError extends Error {
   status: number;
@@ -32,24 +45,152 @@ export class ApiError extends Error {
   }
 }
 
-function getAccessToken(): string | null {
+// -----------------------------------------------------------------------------
+// Token Storage & Single-Flight Refresh Coordinator
+// -----------------------------------------------------------------------------
+
+let memoryAccessToken: string | null = null;
+let refreshPromise: Promise<string | null> | null = null;
+let authFailureHandler: (() => void) | null = null;
+
+function getSessionStorage(): Storage | null {
   if (typeof window === "undefined") return null;
-  return localStorage.getItem("ag_access_token");
+  try {
+    return window.sessionStorage;
+  } catch {
+    return null;
+  }
 }
 
-async function apiFetch<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
+export function getAccessToken(): string | null {
+  return memoryAccessToken;
+}
+
+export function getRefreshToken(): string | null {
+  const storage = getSessionStorage();
+  return storage ? storage.getItem(REFRESH_STORAGE_KEY) : null;
+}
+
+export function hasRefreshToken(): boolean {
+  return Boolean(getRefreshToken());
+}
+
+export function setSessionTokens(accessToken: string, refreshToken: string): void {
+  memoryAccessToken = accessToken;
+  const storage = getSessionStorage();
+  if (storage) {
+    storage.setItem(REFRESH_STORAGE_KEY, refreshToken);
+  }
+}
+
+export function clearSessionTokens(): void {
+  memoryAccessToken = null;
+  const storage = getSessionStorage();
+  if (storage) {
+    storage.removeItem(REFRESH_STORAGE_KEY);
+  }
+  if (typeof window !== "undefined") {
+    try {
+      window.localStorage.removeItem(LEGACY_ACCESS_STORAGE_KEY);
+      window.localStorage.removeItem(REFRESH_STORAGE_KEY);
+    } catch {
+      // Ignore storage access errors
+    }
+  }
+}
+
+export function setAuthFailureHandler(handler: (() => void) | null): void {
+  authFailureHandler = handler;
+}
+
+const SKIP_REFRESH_ENDPOINTS = new Set([
+  "/api/v1/auth/login",
+  "/api/v1/auth/register",
+  "/api/v1/auth/refresh",
+  "/api/v1/auth/logout",
+  "/health",
+  "/api/v1/",
+]);
+
+export async function refreshAccessTokenSingleFlight(): Promise<string | null> {
+  if (!refreshPromise) {
+    const currentRefresh = getRefreshToken();
+    if (!currentRefresh) {
+      clearSessionTokens();
+      return null;
+    }
+
+    let inFlight: Promise<string | null> | null = null;
+    inFlight = (async () => {
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/v1/auth/refresh`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ refresh_token: currentRefresh }),
+        });
+
+        if (!res.ok) {
+          clearSessionTokens();
+          return null;
+        }
+
+        const data = await res.json();
+        if (!data?.access_token || !data?.refresh_token) {
+          clearSessionTokens();
+          return null;
+        }
+
+        setSessionTokens(data.access_token, data.refresh_token);
+        return data.access_token as string;
+      } catch {
+        clearSessionTokens();
+        return null;
+      } finally {
+        if (refreshPromise === inFlight) {
+          refreshPromise = null;
+        }
+      }
+    })();
+    refreshPromise = inFlight;
+  }
+  return refreshPromise;
+}
+
+async function apiFetch<T>(
+  endpoint: string,
+  options: RequestInit = {},
+  isRetry: boolean = false
+): Promise<T> {
   const url = `${API_BASE_URL}${endpoint}`;
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...(options.headers as Record<string, string>),
   };
 
-  const token = getAccessToken();
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
+  const sentToken = getAccessToken();
+  if (sentToken && !SKIP_REFRESH_ENDPOINTS.has(endpoint)) {
+    headers["Authorization"] = `Bearer ${sentToken}`;
   }
 
   const response = await fetch(url, { ...options, headers });
+
+  if (response.status === 401 && !isRetry && !SKIP_REFRESH_ENDPOINTS.has(endpoint)) {
+    // If another concurrent request already rotated the access token, retry with it
+    const latestToken = getAccessToken();
+    if (latestToken && latestToken !== sentToken) {
+      return apiFetch<T>(endpoint, options, true);
+    }
+
+    const refreshedToken = await refreshAccessTokenSingleFlight();
+    if (refreshedToken) {
+      return apiFetch<T>(endpoint, options, true);
+    }
+
+    clearSessionTokens();
+    if (authFailureHandler) {
+      authFailureHandler();
+    }
+  }
 
   if (response.status === 204) {
     return undefined as T;
@@ -80,6 +221,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify(data),
     }),
+
+  refresh: () => refreshAccessTokenSingleFlight(),
 
   getMe: () => apiFetch<User>("/api/v1/auth/me"),
 

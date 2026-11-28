@@ -118,13 +118,15 @@ async def test_login_and_jwt_lifecycle(auth_db: AsyncSession):
     assert token_resp.access_token is not None
     assert token_resp.refresh_token is not None
 
-    # 2. Refresh token
+    # 2. Refresh token rotation
     new_tokens = await auth_service.refresh_access_token(auth_db, token_resp.refresh_token)
     assert new_tokens.access_token is not None
-    assert new_tokens.refresh_token == token_resp.refresh_token
+    assert new_tokens.refresh_token != token_resp.refresh_token
 
-    # 3. Logout (revokes refresh token)
-    await auth_service.revoke_refresh_token(auth_db, token_resp.refresh_token)
+    # 3. Logout (revokes active refresh token and its family)
+    await auth_service.revoke_refresh_token(auth_db, new_tokens.refresh_token)
+    with pytest.raises(UnauthorizedError):
+        await auth_service.refresh_access_token(auth_db, new_tokens.refresh_token)
     with pytest.raises(UnauthorizedError):
         await auth_service.refresh_access_token(auth_db, token_resp.refresh_token)
 
@@ -232,17 +234,22 @@ async def test_auth_api_routes(auth_client: AsyncClient):
     assert me_res.status_code == 200
     assert me_res.json()["username"] == "api_user"
 
-    # 4. Refresh token
+    # 4. Refresh token (rotates refresh token)
     ref_res = await auth_client.post(
         "/api/v1/auth/refresh",
         json={"refresh_token": refresh_token},
     )
     assert ref_res.status_code == 200
     assert "access_token" in ref_res.json()
+    rotated_refresh_token = ref_res.json()["refresh_token"]
+    assert rotated_refresh_token != refresh_token
 
-    # 5. Logout
+    # 5. Logout with rotated refresh token -> revokes session
     logout_res = await auth_client.post(
         "/api/v1/auth/logout",
-        json={"refresh_token": refresh_token},
+        json={"refresh_token": rotated_refresh_token},
     )
     assert logout_res.status_code == 200
+    assert (
+        await auth_client.post("/api/v1/auth/refresh", json={"refresh_token": rotated_refresh_token})
+    ).status_code == 401
