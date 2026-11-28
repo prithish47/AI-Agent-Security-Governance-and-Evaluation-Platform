@@ -105,3 +105,73 @@ class GuardedToolExecutor:
                 result_data=None,
                 error_message=f"Tool execution error: {str(exc)}",
             )
+
+    @classmethod
+    def execute_approved(
+        cls,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        context: SecurityContext,
+    ) -> GuardedExecutionResult:
+        """
+        Execute an approved tool call through the safe catalog.
+        Enforces:
+        1. Tool must be assigned to agent.
+        2. Tool must exist in precompiled catalog.
+        3. Strict execution of approved arguments.
+        4. Fails safe if executor raises any exception.
+        """
+        if tool_name not in context.assigned_tools:
+            decision = PolicyDecision(
+                decision=PolicyDecisionOutcome.DENY,
+                rule_responsible="unassigned_tool",
+                reason=f"Tool '{tool_name}' is not in agent's assigned tools",
+                tool_name=tool_name,
+                policy_version=context.policy_version_number,
+            )
+            return GuardedExecutionResult(
+                tool_name=tool_name,
+                decision=decision,
+                is_blocked=True,
+                error_message=decision.reason,
+            )
+
+        executor = get_executor(tool_name)
+        if not executor:
+            decision = PolicyDecision(
+                decision=PolicyDecisionOutcome.DENY,
+                rule_responsible="unsupported_tool_implementation",
+                reason=f"Tool '{tool_name}' is not in the registered precompiled executor catalog",
+                tool_name=tool_name,
+                policy_version=context.policy_version_number,
+            )
+            return GuardedExecutionResult(
+                tool_name=tool_name,
+                decision=decision,
+                is_blocked=True,
+                error_message=decision.reason,
+            )
+
+        decision = PolicyDecision(
+            decision=PolicyDecisionOutcome.ALLOW,
+            rule_responsible="approved_by_human",
+            reason="Action approved by authorized human reviewer and verified cryptographically",
+            tool_name=tool_name,
+            policy_version=context.policy_version_number,
+        )
+
+        try:
+            output = executor(arguments or {})
+            return GuardedExecutionResult(
+                tool_name=tool_name,
+                decision=decision,
+                result_data=output,
+                is_blocked=False,
+            )
+        except Exception as exc:
+            return GuardedExecutionResult(
+                tool_name=tool_name,
+                decision=decision,
+                is_blocked=True,
+                error_message=f"Executor raised unhandled exception: {str(exc)}",
+            )

@@ -67,8 +67,9 @@ class MockAIProvider(AIProvider):
             # If refund was already executed or approved in history, give final answer
             for msg in reversed(conversation_history):
                 if msg.get("role") == "tool" and msg.get("tool_name") == "issue_refund":
+                    amount = msg.get("result", {}).get("refunded_amount", 0)
                     return AIResponse(
-                        final_answer=f"The refund of ${msg.get('result', {}).get('refunded_amount', 0)} has been processed successfully."
+                        final_answer=f"The refund of ${float(amount):.2f} has been processed successfully."
                     )
             return AIResponse(
                 tool_call=ToolCallProposal(

@@ -71,6 +71,8 @@ class Settings(BaseSettings):
     global_iteration_ceiling: int = 20
     # Default TTL for pending human approval requests
     approval_expiration_minutes: int = 60
+    # Cryptographic action binding version (1: legacy 7-field, 2: enhanced policy_id + schema_hash)
+    approval_binding_version: int = 1
     
     # -------------------------------------------------------------------------
     # AI Providers (all optional — mock provider works without these)

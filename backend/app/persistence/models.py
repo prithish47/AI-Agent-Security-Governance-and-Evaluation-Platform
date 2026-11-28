@@ -97,6 +97,8 @@ class ExecutionStatus(str, enum.Enum):
     MODEL_ERROR = "MODEL_ERROR"
     TOOL_ERROR = "TOOL_ERROR"
     SECURITY_ERROR = "SECURITY_ERROR"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
 
 
 class EvaluationMode(str, enum.Enum):
@@ -324,6 +326,7 @@ class Execution(Base):
     status: Mapped[ExecutionStatus] = mapped_column(Enum(ExecutionStatus, name="execution_status_enum", native_enum=False), default=ExecutionStatus.RUNNING, nullable=False, index=True)
     termination_reason: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     context_snapshot: Mapped[Dict[str, Any]] = mapped_column(JSON_TYPE, nullable=False, default=dict)
+    conversation_history: Mapped[List[Dict[str, Any]]] = mapped_column(JSON_TYPE, nullable=False, default=list)
     final_response: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     iteration_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
@@ -377,6 +380,9 @@ class ApprovalRequest(Base):
     tool_arguments: Mapped[Dict[str, Any]] = mapped_column(JSON_TYPE, nullable=False)
     policy_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     agent_risk_ceiling: Mapped[str] = mapped_column(String(20), nullable=False, default="MEDIUM")
+    binding_version: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+    policy_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("security_policies.id", ondelete="SET NULL"), nullable=True)
+    tool_schema_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     action_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)  # SHA-256 of canonical RFC 8785 JSON
     status: Mapped[ApprovalStatus] = mapped_column(Enum(ApprovalStatus, name="approval_status_enum", native_enum=False), default=ApprovalStatus.PENDING, nullable=False, index=True)
     reviewed_by: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)

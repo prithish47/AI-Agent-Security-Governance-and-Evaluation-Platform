@@ -14,7 +14,7 @@ import hashlib
 import hmac
 import math
 import uuid
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 
 def _format_ecma_number(value: float) -> str:
@@ -142,6 +142,12 @@ def canonicalize_json(data: Any) -> bytes:
     return _serialize_jcs(data).encode("utf-8")
 
 
+def compute_tool_schema_hash(schema: Optional[Dict[str, Any]]) -> str:
+    """Compute SHA-256 hex digest of the canonical RFC 8785 JSON tool schema."""
+    canonical_bytes = canonicalize_json(schema or {})
+    return hashlib.sha256(canonical_bytes).hexdigest()
+
+
 def build_action_binding_payload(
     *,
     project_id: uuid.UUID | str,
@@ -151,14 +157,30 @@ def build_action_binding_payload(
     arguments: Dict[str, Any],
     policy_version: int,
     agent_risk_ceiling: str,
+    binding_version: int = 1,
+    policy_id: Optional[uuid.UUID | str] = None,
+    tool_schema_hash: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Construct the canonical immutable action binding payload.
-    All fields are persisted on ApprovalRequest/Execution so verification is
-    fully reproducible at review and consumption time.
+    Supports versioned payloads:
+    - Version 1: Legacy Milestone 2 binding (project, agent, execution, tool, arguments, policy_version, ceiling)
+    - Version 2: Enhanced Milestone 2.1 binding (includes policy_id and tool_schema_hash)
     """
+    if binding_version == 1:
+        return {
+            "binding_version": 1,
+            "project_id": str(project_id),
+            "agent_id": str(agent_id),
+            "execution_id": str(execution_id),
+            "tool_name": tool_name,
+            "tool_arguments": arguments,
+            "policy_version": int(policy_version),
+            "agent_risk_ceiling": str(agent_risk_ceiling),
+        }
+
     return {
-        "binding_version": 1,
+        "binding_version": 2,
         "project_id": str(project_id),
         "agent_id": str(agent_id),
         "execution_id": str(execution_id),
@@ -166,6 +188,8 @@ def build_action_binding_payload(
         "tool_arguments": arguments,
         "policy_version": int(policy_version),
         "agent_risk_ceiling": str(agent_risk_ceiling),
+        "policy_id": str(policy_id) if policy_id else None,
+        "tool_schema_hash": str(tool_schema_hash) if tool_schema_hash else None,
     }
 
 
@@ -178,6 +202,9 @@ def compute_action_hash(
     arguments: Dict[str, Any],
     policy_version: int,
     agent_risk_ceiling: str,
+    binding_version: int = 1,
+    policy_id: Optional[uuid.UUID | str] = None,
+    tool_schema_hash: Optional[str] = None,
 ) -> str:
     """Compute SHA-256 hex digest of the RFC 8785 canonical action binding."""
     payload = build_action_binding_payload(
@@ -188,6 +215,9 @@ def compute_action_hash(
         arguments=arguments,
         policy_version=policy_version,
         agent_risk_ceiling=agent_risk_ceiling,
+        binding_version=binding_version,
+        policy_id=policy_id,
+        tool_schema_hash=tool_schema_hash,
     )
     canonical_bytes = canonicalize_json(payload)
     return hashlib.sha256(canonical_bytes).hexdigest()
@@ -203,22 +233,34 @@ def verify_action_hash(
     policy_version: int,
     agent_risk_ceiling: str,
     expected_hash: str,
+    binding_version: Optional[int] = None,
+    policy_id: Optional[uuid.UUID | str] = None,
+    tool_schema_hash: Optional[str] = None,
 ) -> bool:
     """
     Recompute action hash from full bound context and verify in constant time.
+    Accepts explicit binding_version or tries v2 then v1 for backward compatibility.
     """
     if not expected_hash:
         return False
-    try:
-        computed = compute_action_hash(
-            project_id=project_id,
-            agent_id=agent_id,
-            execution_id=execution_id,
-            tool_name=tool_name,
-            arguments=arguments,
-            policy_version=policy_version,
-            agent_risk_ceiling=agent_risk_ceiling,
-        )
-    except ValueError:
-        return False
-    return hmac.compare_digest(computed, expected_hash)
+
+    versions_to_try = [binding_version] if binding_version is not None else [2, 1]
+    for ver in versions_to_try:
+        try:
+            computed = compute_action_hash(
+                project_id=project_id,
+                agent_id=agent_id,
+                execution_id=execution_id,
+                tool_name=tool_name,
+                arguments=arguments,
+                policy_version=policy_version,
+                agent_risk_ceiling=agent_risk_ceiling,
+                binding_version=ver,
+                policy_id=policy_id,
+                tool_schema_hash=tool_schema_hash,
+            )
+            if hmac.compare_digest(computed, expected_hash):
+                return True
+        except ValueError:
+            continue
+    return False

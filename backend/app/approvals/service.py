@@ -7,6 +7,7 @@
 # 3. Expiration enforcement (expired approvals transition to EXPIRED and fail).
 # 4. Atomic single-use consumption: an approval can NEVER be executed twice.
 # 5. Separation of duties: execution initiator cannot approve, reject, or resume.
+# 6. Secure multi-turn resumption: resumes bounded orchestration loop.
 # =============================================================================
 
 import uuid
@@ -15,7 +16,8 @@ from typing import List, Optional
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.approvals.canonical import verify_action_hash
+from app.ai.base import AIProvider
+from app.approvals.canonical import compute_tool_schema_hash, verify_action_hash
 from app.audit import service as audit_service
 from app.audit.schemas import AuditEventCreate
 from app.core.exceptions import (
@@ -29,10 +31,9 @@ from app.persistence.models import (
     ApprovalStatus,
     AuditSeverity,
     Execution,
-    ExecutionStep,
     ExecutionStatus,
 )
-from app.tools.catalog import get_executor
+from app.runtime.state import validate_execution_transition
 
 
 async def get_approval(db: AsyncSession, approval_id: uuid.UUID) -> ApprovalRequest:
@@ -153,6 +154,23 @@ async def _verify_approval_binding_and_context(
                 f"Risk ceiling mismatch: approval bound to '{approval.agent_risk_ceiling}', "
                 f"execution snapshot has '{snap.get('agent_risk_ceiling')}'"
             )
+        elif (approval.binding_version or 1) >= 2:
+            snap_pol_id = snap.get("policy_id")
+            appr_pol_id = str(approval.policy_id) if approval.policy_id else None
+            if snap_pol_id != appr_pol_id:
+                violation_reason = (
+                    f"Policy ID mismatch: approval bound to policy '{appr_pol_id}', "
+                    f"execution snapshot has policy '{snap_pol_id}'"
+                )
+            elif approval.tool_schema_hash:
+                schema = snap.get("tool_schemas", {}).get(approval.tool_name, {})
+                current_schema_hash = compute_tool_schema_hash(schema)
+                if current_schema_hash != approval.tool_schema_hash:
+                    violation_reason = (
+                        f"Tool definition schema mismatch for '{approval.tool_name}': "
+                        f"approval bound to schema hash {approval.tool_schema_hash}, "
+                        f"current snapshot has {current_schema_hash}"
+                    )
 
     if violation_reason is None and not verify_action_hash(
         project_id=approval.project_id,
@@ -163,12 +181,18 @@ async def _verify_approval_binding_and_context(
         policy_version=approval.policy_version,
         agent_risk_ceiling=approval.agent_risk_ceiling,
         expected_hash=approval.action_hash,
+        binding_version=approval.binding_version,
+        policy_id=approval.policy_id,
+        tool_schema_hash=approval.tool_schema_hash,
     ):
         violation_reason = "Approval action hash verification failed (tampering or context drift detected)"
 
     if violation_reason is not None:
         approval.status = ApprovalStatus.REJECTED
         approval.review_note = f"SECURITY VIOLATION ({stage}): {violation_reason}"
+        if execution and execution.status == ExecutionStatus.REQUIRES_APPROVAL:
+            execution.status = ExecutionStatus.FAILED
+            execution.termination_reason = f"Security violation: {violation_reason}"
         await db.commit()
 
         await audit_service.record_audit_event(
@@ -247,6 +271,7 @@ async def reject_request(
     approval.reviewed_at = now
 
     if execution:
+        validate_execution_transition(execution.status, ExecutionStatus.DENIED)
         execution.status = ExecutionStatus.DENIED
         execution.termination_reason = f"Human reviewer rejected action: {note or 'No reason provided'}"
         execution.completed_at = now
@@ -272,6 +297,7 @@ async def resume_and_consume_approval(
     db: AsyncSession,
     approval_id: uuid.UUID,
     actor_id: Optional[uuid.UUID] = None,
+    provider: Optional[AIProvider] = None,
 ) -> Execution:
     """
     EXECUTION INTEGRITY & ATOMIC SINGLE-USE CONSUMPTION:
@@ -280,8 +306,7 @@ async def resume_and_consume_approval(
     3. Reconstruct action binding, recompute RFC 8785 SHA-256 hash, and verify
        execution, agent, project, tool, and policy context BEFORE consumption.
     4. Atomically transition APPROVED -> CONSUMED (with expiration guard).
-    5. Execute strictly the verified approved tool_name and tool_arguments.
-    6. Record step trace and complete Execution.
+    5. Delegate secure multi-turn resumption to AgentRuntimeOrchestrator.resume_execution.
     """
     pre_approval = await get_approval(db, approval_id)
 
@@ -319,44 +344,15 @@ async def resume_and_consume_approval(
             f"Approval cannot be executed in state '{current.status.value}', must be 'APPROVED'"
         )
 
-    # Execute strictly the verified approved action from the safe catalog
-    executor = get_executor(consumed_approval.tool_name)
-    if not executor:
-        raise NotFoundError("ToolExecutor", consumed_approval.tool_name)
-
-    tool_result = executor(consumed_approval.tool_arguments)
-
-    assert execution is not None
-    step_num = execution.iteration_count + 1
-    step = ExecutionStep(
-        execution_id=execution.id,
-        step_number=step_num,
-        step_type="APPROVED_TOOL_EXECUTION",
-        tool_name=consumed_approval.tool_name,
-        tool_arguments=consumed_approval.tool_arguments,
-        policy_decision="APPROVED_AND_EXECUTED",
-        tool_result=tool_result,
-        model_response=f"Approved action '{consumed_approval.tool_name}' executed successfully.",
-    )
-    db.add(step)
-
-    execution.status = ExecutionStatus.COMPLETED
-    execution.final_response = (
-        f"Approved tool '{consumed_approval.tool_name}' was executed successfully. Result: {tool_result}"
-    )
-    execution.termination_reason = "COMPLETED"
-    execution.completed_at = datetime.now(timezone.utc)
-
     await db.commit()
     await db.refresh(consumed_approval)
-    await db.refresh(execution)
 
     await audit_service.record_audit_event(
         db,
         AuditEventCreate(
             project_id=consumed_approval.project_id,
             actor_id=actor_id,
-            execution_id=execution.id,
+            execution_id=consumed_approval.execution_id,
             event_type="APPROVAL_CONSUMED",
             severity=AuditSeverity.INFO,
             event_metadata={
@@ -366,4 +362,13 @@ async def resume_and_consume_approval(
             },
         ),
     )
-    return execution
+
+    # Delegate secure multi-turn execution resumption to the Orchestrator
+    from app.runtime.orchestrator import AgentRuntimeOrchestrator
+    return await AgentRuntimeOrchestrator.resume_execution(
+        db=db,
+        execution_id=consumed_approval.execution_id,
+        consumed_approval=consumed_approval,
+        provider=provider,
+        actor_id=actor_id,
+    )

@@ -66,6 +66,7 @@ class SecurityContext:
     tool_schemas: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     policy_rules: Dict[str, Any] = field(default_factory=dict)
     policy_version_number: int = 1
+    policy_id: Optional[str] = None
     authorized_resource_scopes: Set[str] = field(default_factory=set)
 
 

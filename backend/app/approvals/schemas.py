@@ -32,3 +32,6 @@ class ApprovalResponse(BaseModel):
     created_at: datetime
     reviewed_at: Optional[datetime]
     expires_at: Optional[datetime]
+    binding_version: int = 2
+    policy_id: Optional[UUID] = None
+    tool_schema_hash: Optional[str] = None

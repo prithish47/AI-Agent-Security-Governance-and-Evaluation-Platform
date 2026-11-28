@@ -88,7 +88,47 @@ async def create_pinned_context(
         tool_schemas=tool_schemas,
         policy_rules=policy_rules,
         policy_version_number=policy_version_number,
+        policy_id=str(agent.policy_id) if agent.policy_id else None,
         authorized_resource_scopes={str(agent.project_id)},
     )
 
     return context, agent
+
+
+async def reconstruct_or_load_pinned_context(
+    db: AsyncSession,
+    context_snapshot: Dict[str, Any],
+    agent_id: uuid.UUID,
+    project_id: uuid.UUID,
+) -> SecurityContext:
+    """
+    Reconstruct the immutable SecurityContext from an execution's context_snapshot.
+    If the snapshot contains all frozen tool schemas and rules, it is reconstructed
+    in-memory with ZERO database queries. If older snapshot data lacks tool_schemas,
+    it falls back to loading via create_pinned_context.
+    """
+    snap_tools = context_snapshot.get("assigned_tools")
+    snap_schemas = context_snapshot.get("tool_schemas")
+
+    if snap_tools is not None and snap_schemas is not None:
+        agent_risk_raw = context_snapshot.get("agent_risk_ceiling", "MEDIUM")
+        agent_risk = RiskLevel(agent_risk_raw)
+        tool_risk_levels = {
+            k: RiskLevel(v) for k, v in context_snapshot.get("tool_risk_levels", {}).items()
+        }
+        return SecurityContext(
+            agent_id=str(agent_id),
+            project_id=str(project_id),
+            assigned_tools=set(snap_tools),
+            agent_risk_ceiling=agent_risk,
+            tool_risk_levels=tool_risk_levels,
+            tool_schemas=snap_schemas,
+            policy_rules=context_snapshot.get("policy_rules", {}),
+            policy_version_number=context_snapshot.get("policy_version", 1),
+            policy_id=context_snapshot.get("policy_id"),
+            authorized_resource_scopes={str(project_id)},
+        )
+
+    # Fallback for legacy snapshots
+    context, _ = await create_pinned_context(db, agent_id)
+    return context
