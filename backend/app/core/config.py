@@ -69,6 +69,8 @@ class Settings(BaseSettings):
     # Maximum number of iterations any agent execution can perform
     # This is a hard ceiling — individual agents can set lower limits
     global_iteration_ceiling: int = 20
+    # Default TTL for pending human approval requests
+    approval_expiration_minutes: int = 60
     
     # -------------------------------------------------------------------------
     # AI Providers (all optional — mock provider works without these)

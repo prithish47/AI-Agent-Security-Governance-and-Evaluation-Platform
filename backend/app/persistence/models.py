@@ -375,6 +375,8 @@ class ApprovalRequest(Base):
     agent_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("agents.id", ondelete="CASCADE"), nullable=False, index=True)
     tool_name: Mapped[str] = mapped_column(String(100), nullable=False)
     tool_arguments: Mapped[Dict[str, Any]] = mapped_column(JSON_TYPE, nullable=False)
+    policy_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    agent_risk_ceiling: Mapped[str] = mapped_column(String(20), nullable=False, default="MEDIUM")
     action_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)  # SHA-256 of canonical RFC 8785 JSON
     status: Mapped[ApprovalStatus] = mapped_column(Enum(ApprovalStatus, name="approval_status_enum", native_enum=False), default=ApprovalStatus.PENDING, nullable=False, index=True)
     reviewed_by: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)

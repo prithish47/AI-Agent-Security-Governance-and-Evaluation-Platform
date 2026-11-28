@@ -205,8 +205,16 @@ async def test_approval_workflow_and_single_use_consumption(runtime_db: AsyncSes
     assert approval.status == ApprovalStatus.PENDING
     assert approval.tool_name == "issue_refund"
 
-    # Verify action hash
-    expected_hash = compute_action_hash(approval.tool_name, approval.tool_arguments)
+    # Verify full execution-bound action hash
+    expected_hash = compute_action_hash(
+        project_id=approval.project_id,
+        agent_id=approval.agent_id,
+        execution_id=approval.execution_id,
+        tool_name=approval.tool_name,
+        arguments=approval.tool_arguments,
+        policy_version=approval.policy_version,
+        agent_risk_ceiling=approval.agent_risk_ceiling,
+    )
     assert approval.action_hash == expected_hash
 
     # 3. Approver reviews and approves request

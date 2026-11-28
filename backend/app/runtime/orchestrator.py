@@ -12,7 +12,7 @@
 # =============================================================================
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -220,16 +220,28 @@ class AgentRuntimeOrchestrator:
 
                 # Case B: Policy REQUIRES_APPROVAL
                 if guarded_result.requires_approval:
-                    # Suspend execution and create pending approval record with SHA-256 action hash
-                    action_hash = compute_action_hash(proposal.tool_name, proposal.arguments)
+                    # Suspend execution and create pending approval record with full RFC 8785 action binding
+                    now_utc = datetime.now(timezone.utc)
+                    action_hash = compute_action_hash(
+                        project_id=agent.project_id,
+                        agent_id=agent.id,
+                        execution_id=execution.id,
+                        tool_name=proposal.tool_name,
+                        arguments=proposal.arguments,
+                        policy_version=security_context.policy_version_number,
+                        agent_risk_ceiling=security_context.agent_risk_ceiling.value,
+                    )
                     approval = ApprovalRequest(
                         project_id=agent.project_id,
                         execution_id=execution.id,
                         agent_id=agent.id,
                         tool_name=proposal.tool_name,
                         tool_arguments=proposal.arguments,
+                        policy_version=security_context.policy_version_number,
+                        agent_risk_ceiling=security_context.agent_risk_ceiling.value,
                         action_hash=action_hash,
                         status=ApprovalStatus.PENDING,
+                        expires_at=now_utc + timedelta(minutes=settings.approval_expiration_minutes),
                     )
                     db.add(approval)
 

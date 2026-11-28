@@ -23,6 +23,8 @@ class ApprovalResponse(BaseModel):
     agent_id: UUID
     tool_name: str
     tool_arguments: Dict[str, Any]
+    policy_version: int
+    agent_risk_ceiling: str
     action_hash: str
     status: ApprovalStatus
     reviewed_by: Optional[UUID]
